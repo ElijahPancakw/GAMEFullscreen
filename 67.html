@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="viewport" content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0">
+  <link rel="icon" type="image/png" href="https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/favicon.png">
+  <title>UNDERTALE - Local Loader</title>
+  <style>
+    /* (kept most styles from your original file; simplified a little) */
+    html,body{height:100%;margin:0;background:black;color:#fff;font-family:Arial,monospace}
+    .loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+    .spinner{height:30px;width:30px;border:5px solid #bdff00;border-top:5px solid #719900;border-radius:50%;animation:rot .8s linear infinite}
+    @keyframes rot{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+    #status{font-weight:bold}
+    progress{width:300px;height:12px;border-radius:10px}
+  </style>
+</head>
+<body>
+  <canvas id="canvas" class="emscripten" width="640" height="480" style="display:block;margin:0 auto;background:black;"></canvas>
+
+  <div class="loading" id="loadingBox">
+    <div class="spinner" id="spinner"></div>
+    <div id="status">Preparing download...</div>
+    <progress id="progress" value="0" max="100"></progress>
+  </div>
+
+  <div id="message-container" style="display:none;position:absolute;top:0;left:0;right:0;padding:8px;background:rgba(0,0,0,0.6)">
+    <div id="messages"></div>
+  </div>
+
+  <script>
+    // --- CDN URLs you provided ---
+    const urls = {
+      indexJs: 'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/index.js',
+      runnerJs: 'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/runner.js',
+      parts: [
+        'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/game.unx.part1',
+        'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/game.unx.part2',
+        'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/game.unx.part3',
+        'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/game.unx.part4',
+        'https://cdn.jsdelivr.net/gh/genizy/web-port@1102f068fff0083d2a5ed979ebac6425540d78a5/undertale/game.unx.part5'
+      ]
+    };
+
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progress');
+
+    function updateProgress(percent, text) {
+      progressEl.value = percent;
+      statusEl.textContent = text ?? `Downloading... ${Math.round(percent)}%`;
+    }
+
+    async function fetchAllParts(partUrls) {
+      const buffers = [];
+      for (let i = 0; i < partUrls.length; i++) {
+        const url = partUrls[i];
+        updateProgress((i / partUrls.length) * 100, `Downloading part ${i + 1} of ${partUrls.length}...`);
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error('Failed to fetch ' + url + ' (status ' + resp.status + ')');
+        const ab = await resp.arrayBuffer();
+        buffers.push(new Uint8Array(ab)); // keep as typed array
+      }
+      updateProgress(100, 'Merging parts...');
+      // Concatenate buffers
+      let totalLen = buffers.reduce((s, b) => s + b.length, 0);
+      let merged = new Uint8Array(totalLen);
+      let offset = 0;
+      for (const b of buffers) {
+        merged.set(b, offset);
+        offset += b.length;
+      }
+      return new Blob([merged], { type: 'application/octet-stream' });
+    }
+
+    (async () => {
+      try {
+        // 1) Download and merge the parts
+        const blob = await fetchAllParts(urls.parts);
+        const blobUrl = URL.createObjectURL(blob);
+        // 2) Intercept fetch and XHR so requests for "game.unx" return our blob
+        const originalFetch = window.fetch;
+        window.fetch = function(input, init) {
+          // handle string or Request
+          const requestUrl = (input && input.url) ? input.url : input;
+          if (typeof requestUrl === 'string' && requestUrl.includes('game.unx')) {
+            // return a Response based on our blob
+            return originalFetch(blobUrl).then(r => r);
+          }
+          return originalFetch(input, init);
+        };
+
+        const origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+          if (typeof url === 'string' && url.includes('game.unx')) {
+            // replace with blob URL
+            return origOpen.call(this, method, blobUrl, ...rest);
+          }
+          return origOpen.call(this, method, url, ...rest);
+        };
+
+        updateProgress(100, 'Loaded game data — loading engine scripts...');
+        // 3) Load index.js and runner.js from CDN (append scripts)
+        await new Promise((resolve, reject) => {
+          const s1 = document.createElement('script');
+          s1.src = urls.indexJs;
+          s1.onload = () => {
+            const s2 = document.createElement('script');
+            s2.src = urls.runnerJs;
+            s2.onload = () => resolve();
+            s2.onerror = (e) => reject(new Error('Failed to load runner.js: ' + e.message));
+            document.body.appendChild(s2);
+          };
+          s1.onerror = (e) => reject(new Error('Failed to load index.js: ' + e.message));
+          document.body.appendChild(s1);
+        });
+
+        // hide the loading UI (the engine may show something else)
+        document.getElementById('loadingBox').style.display = 'none';
+        // done
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Error: ' + err.message;
+        progressEl.style.display = 'none';
+        document.getElementById('spinner').style.display = 'none';
+      }
+    })();
+  </script>
+</body>
+</html>
